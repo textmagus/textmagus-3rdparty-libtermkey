@@ -1,13 +1,25 @@
+// we want strdup()
+#define _XOPEN_SOURCE 600
+
 #include "termkey.h"
 #include "termkey-internal.h"
 
-#include <term.h>
-#include <curses.h>
+#ifdef HAVE_UNIBILIUM
+# include <unibilium.h>
+#else
+# include <curses.h>
+# include <term.h>
+
+/* curses.h has just poluted our namespace. We want this back */
+# undef buttons
+#endif
 
 #include <ctype.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 
 /* To be efficient at lookups, we store the byte sequence => keyinfo mapping
  * in a trie. This avoids a slow linear search through a flat list of
@@ -17,7 +29,8 @@
 
 typedef enum {
   TYPE_KEY,
-  TYPE_ARR
+  TYPE_ARR,
+  TYPE_MOUSE,
 } trie_nodetype;
 
 struct trie_node {
@@ -32,21 +45,24 @@ struct trie_node_key {
 struct trie_node_arr {
   trie_nodetype type;
   unsigned char min, max; /* INCLUSIVE endpoints of the extent range */
-  struct trie_node *arr[0];
+  struct trie_node *arr[]; /* dynamic size at allocation time */
 };
 
 typedef struct {
-  termkey_t *tk;
+  TermKey *tk;
 
   struct trie_node *root;
-} termkey_ti;
 
-static int funcname2keysym(const char *funcname, termkey_type *typep, termkey_keysym *symp, int *modmask, int *modsetp);
-static int register_seq(termkey_ti *ti, const char *seq, termkey_type type, termkey_keysym sym, int modmask, int modset);
+  char *start_string;
+  char *stop_string;
+} TermKeyTI;
 
-static struct trie_node *new_node_key(termkey_type type, termkey_keysym sym, int modmask, int modset)
+static int funcname2keysym(const char *funcname, TermKeyType *typep, TermKeySym *symp, int *modmask, int *modsetp);
+static int insert_seq(TermKeyTI *ti, const char *seq, struct trie_node *node);
+
+static struct trie_node *new_node_key(TermKeyType type, TermKeySym sym, int modmask, int modset)
 {
-  struct trie_node_key *n = malloc(sizeof(struct trie_node_key));
+  struct trie_node_key *n = malloc(sizeof(*n));
   if(!n)
     return NULL;
 
@@ -62,7 +78,7 @@ static struct trie_node *new_node_key(termkey_type type, termkey_keysym sym, int
 
 static struct trie_node *new_node_arr(unsigned char min, unsigned char max)
 {
-  struct trie_node_arr *n = malloc(sizeof(struct trie_node_arr) + ((int)max-min+1) * sizeof(void*));
+  struct trie_node_arr *n = malloc(sizeof(*n) + ((int)max-min+1) * sizeof(n->arr[0]));
   if(!n)
     return NULL;
 
@@ -80,6 +96,7 @@ static struct trie_node *lookup_next(struct trie_node *n, unsigned char b)
 {
   switch(n->type) {
   case TYPE_KEY:
+  case TYPE_MOUSE:
     fprintf(stderr, "ABORT: lookup_next within a TYPE_KEY node\n");
     abort();
   case TYPE_ARR:
@@ -98,6 +115,7 @@ static void free_trie(struct trie_node *n)
 {
   switch(n->type) {
   case TYPE_KEY:
+  case TYPE_MOUSE:
     break;
   case TYPE_ARR:
     {
@@ -120,6 +138,7 @@ static struct trie_node *compress_trie(struct trie_node *n)
 
   switch(n->type) {
   case TYPE_KEY:
+  case TYPE_MOUSE:
     return n;
   case TYPE_ARR:
     {
@@ -144,14 +163,109 @@ static struct trie_node *compress_trie(struct trie_node *n)
   return n;
 }
 
-static void *new_driver(termkey_t *tk, const char *term)
+static int load_terminfo(TermKeyTI *ti, const char *term)
 {
+  int i;
+
+#ifdef HAVE_UNIBILIUM
+  unibi_term *unibi = unibi_from_term(term);
+  if(!unibi)
+    return 0;
+#else
   int err;
 
-  if(setupterm(term, 1, &err) != OK)
-    return NULL;
+  /* Have to cast away the const. But it's OK - we know terminfo won't really
+   * modify term */
+  if(setupterm((char*)term, 1, &err) != OK)
+    return 0;
+#endif
 
-  termkey_ti *ti = malloc(sizeof *ti);
+#ifdef HAVE_UNIBILIUM
+  for(i = unibi_string_begin_+1; i < unibi_string_end_; i++)
+#else
+  for(i = 0; strfnames[i]; i++)
+#endif
+  {
+    // Only care about the key_* constants
+#ifdef HAVE_UNIBILIUM
+    const char *name = unibi_name_str(i);
+#else
+    const char *name = strfnames[i];
+#endif
+    if(strncmp(name, "key_", 4) != 0)
+      continue;
+
+#ifdef HAVE_UNIBILIUM
+    const char *value = unibi_get_str(unibi, i);
+#else
+    const char *value = tigetstr(strnames[i]);
+#endif
+    if(!value || value == (char*)-1)
+      continue;
+
+    struct trie_node *node = NULL;
+
+    if(strcmp(name + 4, "mouse") == 0) {
+      node = malloc(sizeof(*node));
+      if(!node)
+        return 0;
+
+      node->type = TYPE_MOUSE;
+    }
+    else {
+      TermKeyType type;
+      TermKeySym sym;
+      int mask = 0;
+      int set  = 0;
+
+      if(!funcname2keysym(name + 4, &type, &sym, &mask, &set))
+        continue;
+
+      if(sym == TERMKEY_SYM_NONE)
+        continue;
+
+      node = new_node_key(type, sym, mask, set);
+    }
+
+    if(node)
+      if(!insert_seq(ti, value, node)) {
+        free(node);
+        return 0;
+      }
+  }
+
+  /* Take copies of these terminfo strings, in case we build multiple termkey
+   * instances for multiple different termtypes, and it's different by the
+   * time we want to use it
+   */
+#ifdef HAVE_UNIBILIUM
+  const char *keypad_xmit = unibi_get_str(unibi, unibi_pkey_xmit);
+#endif
+
+  if(keypad_xmit)
+    ti->start_string = strdup(keypad_xmit);
+  else
+    ti->start_string = NULL;
+
+#ifdef HAVE_UNIBILIUM
+  const char *keypad_local = unibi_get_str(unibi, unibi_pkey_local);
+#endif
+
+  if(keypad_local)
+    ti->stop_string = strdup(keypad_local);
+  else
+    ti->stop_string = NULL;
+
+#ifdef HAVE_UNIBILIUM
+  unibi_destroy(unibi);
+#endif
+
+  return 1;
+}
+
+static void *new_driver(TermKey *tk, const char *term)
+{
+  TermKeyTI *ti = malloc(sizeof *ti);
   if(!ti)
     return NULL;
 
@@ -161,29 +275,8 @@ static void *new_driver(termkey_t *tk, const char *term)
   if(!ti->root)
     goto abort_free_ti;
 
-  int i;
-  for(i = 0; strfnames[i]; i++) {
-    // Only care about the key_* constants
-    const char *name = strfnames[i];
-    if(strncmp(name, "key_", 4) != 0)
-      continue;
-
-    const char *value = tigetstr(strnames[i]);
-    if(!value || value == (char*)-1)
-      continue;
-
-    termkey_type type;
-    termkey_keysym sym;
-    int mask = 0;
-    int set  = 0;
-
-    if(!funcname2keysym(strfnames[i] + 4, &type, &sym, &mask, &set))
-      continue;
-
-    if(sym != TERMKEY_SYM_NONE)
-      if(!register_seq(ti, value, type, sym, mask, set))
-        goto abort_free_trie;
-  }
+  if(!load_terminfo(ti, term))
+    goto abort_free_trie;
 
   ti->root = compress_trie(ti->root);
 
@@ -198,46 +291,99 @@ abort_free_ti:
   return NULL;
 }
 
-static void start_driver(termkey_t *tk, void *info)
+static int start_driver(TermKey *tk, void *info)
 {
+  TermKeyTI *ti = info;
+  struct stat statbuf;
+  char *start_string = ti->start_string;
+  size_t len;
+
+  if(tk->fd == -1 || !start_string)
+    return 1;
+
   /* The terminfo database will contain keys in application cursor key mode.
    * We may need to enable that mode
    */
-  if(keypad_xmit) {
-    // Can't call putp or tputs because they suck and don't give us fd control
-    write(tk->fd, keypad_xmit, strlen(keypad_xmit));
+
+  /* There's no point trying to write() to a pipe */
+  if(fstat(tk->fd, &statbuf) == -1)
+    return 0;
+
+  if(S_ISFIFO(statbuf.st_mode))
+    return 1;
+
+  // Can't call putp or tputs because they suck and don't give us fd control
+  len = strlen(start_string);
+  while(len) {
+    size_t written = write(tk->fd, start_string, len);
+    if(written == -1)
+      return 0;
+    start_string += written;
+    len -= written;
   }
+  return 1;
 }
 
-static void stop_driver(termkey_t *tk, void *info)
+static int stop_driver(TermKey *tk, void *info)
 {
-  if(keypad_local) {
-    // Can't call putp or tputs because they suck and don't give us fd control
-    write(tk->fd, keypad_local, strlen(keypad_local));
+  TermKeyTI *ti = info;
+  struct stat statbuf;
+  char *stop_string = ti->stop_string;
+  size_t len;
+
+  if(tk->fd == -1 || !stop_string)
+    return 1;
+
+  /* There's no point trying to write() to a pipe */
+  if(fstat(tk->fd, &statbuf) == -1)
+    return 0;
+
+  if(S_ISFIFO(statbuf.st_mode))
+    return 1;
+
+  /* The terminfo database will contain keys in application cursor key mode.
+   * We may need to enable that mode
+   */
+
+  // Can't call putp or tputs because they suck and don't give us fd control
+  len = strlen(stop_string);
+  while(len) {
+    size_t written = write(tk->fd, stop_string, len);
+    if(written == -1)
+      return 0;
+    stop_string += written;
+    len -= written;
   }
+  return 1;
 }
 
 static void free_driver(void *info)
 {
-  termkey_ti *ti = info;
+  TermKeyTI *ti = info;
 
   free_trie(ti->root);
+
+  if(ti->start_string)
+    free(ti->start_string);
+
+  if(ti->stop_string)
+    free(ti->stop_string);
 
   free(ti);
 }
 
 #define CHARAT(i) (tk->buffer[tk->buffstart + (i)])
 
-static termkey_result getkey(termkey_t *tk, void *info, termkey_key *key, int force)
+static TermKeyResult peekkey(TermKey *tk, void *info, TermKeyKey *key, int force, size_t *nbytep)
 {
-  termkey_ti *ti = info;
+  TermKeyTI *ti = info;
 
   if(tk->buffcount == 0)
     return tk->is_closed ? TERMKEY_RES_EOF : TERMKEY_RES_NONE;
 
   struct trie_node *p = ti->root;
 
-  int pos = 0;
+  unsigned int pos = 0;
   while(pos < tk->buffcount) {
     p = lookup_next(p, CHARAT(pos));
     if(!p)
@@ -250,8 +396,22 @@ static termkey_result getkey(termkey_t *tk, void *info, termkey_key *key, int fo
       key->type      = nk->key.type;
       key->code.sym  = nk->key.sym;
       key->modifiers = nk->key.modifier_set;
-      (*tk->method.eat_bytes)(tk, pos);
+      *nbytep = pos;
       return TERMKEY_RES_KEY;
+    }
+    else if(p->type == TYPE_MOUSE) {
+      tk->buffstart += pos;
+      tk->buffcount -= pos;
+
+      TermKeyResult mouse_result = (*tk->method.peekkey_mouse)(tk, key, nbytep);
+
+      tk->buffstart -= pos;
+      tk->buffcount += pos;
+
+      if(mouse_result == TERMKEY_RES_KEY)
+        *nbytep += pos;
+
+      return mouse_result;
     }
   }
 
@@ -265,8 +425,8 @@ static termkey_result getkey(termkey_t *tk, void *info, termkey_key *key, int fo
 
 static struct {
   const char *funcname;
-  termkey_type type;
-  termkey_keysym sym;
+  TermKeyType type;
+  TermKeySym sym;
   int mods;
 } funcs[] =
 {
@@ -316,7 +476,7 @@ static struct {
   { NULL },
 };
 
-static int funcname2keysym(const char *funcname, termkey_type *typep, termkey_keysym *symp, int *modmaskp, int *modsetp)
+static int funcname2keysym(const char *funcname, TermKeyType *typep, TermKeySym *symp, int *modmaskp, int *modsetp)
 {
   // Binary search
 
@@ -363,7 +523,7 @@ static int funcname2keysym(const char *funcname, termkey_type *typep, termkey_ke
   return 0;
 }
 
-static int register_seq(termkey_ti *ti, const char *seq, termkey_type type, termkey_keysym sym, int modmask, int modset)
+static int insert_seq(TermKeyTI *ti, const char *seq, struct trie_node *node)
 {
   int pos = 0;
   struct trie_node *p = ti->root;
@@ -386,7 +546,7 @@ static int register_seq(termkey_ti *ti, const char *seq, termkey_type type, term
       next = new_node_arr(0, 0xff);
     else
       // Final key node
-      next = new_node_key(type, sym, modmask, modset);
+      next = node;
 
     if(!next)
       return 0;
@@ -405,6 +565,7 @@ static int register_seq(termkey_ti *ti, const char *seq, termkey_type type, term
         break;
       }
     case TYPE_KEY:
+    case TYPE_MOUSE:
       fprintf(stderr, "ASSERT FAIL: Tried to insert child node in TYPE_KEY\n");
       abort();
     }
@@ -415,7 +576,7 @@ static int register_seq(termkey_ti *ti, const char *seq, termkey_type type, term
   return 1;
 }
 
-struct termkey_driver termkey_driver_ti = {
+struct TermKeyDriver termkey_driver_ti = {
   .name        = "terminfo",
 
   .new_driver  = new_driver,
@@ -424,5 +585,5 @@ struct termkey_driver termkey_driver_ti = {
   .start_driver = start_driver,
   .stop_driver  = stop_driver,
 
-  .getkey = getkey,
+  .peekkey = peekkey,
 };
