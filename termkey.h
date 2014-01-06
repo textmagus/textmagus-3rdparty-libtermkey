@@ -9,7 +9,7 @@ extern "C" {
 #include <stdlib.h>
 
 #define TERMKEY_VERSION_MAJOR 0
-#define TERMKEY_VERSION_MINOR 16
+#define TERMKEY_VERSION_MINOR 17
 
 #define TERMKEY_CHECK_VERSION \
         termkey_check_version(TERMKEY_VERSION_MAJOR, TERMKEY_VERSION_MINOR)
@@ -198,9 +198,9 @@ size_t termkey_push_bytes(TermKey *tk, const char *bytes, size_t len);
 
 TermKeySym termkey_register_keyname(TermKey *tk, TermKeySym sym, const char *name);
 const char *termkey_get_keyname(TermKey *tk, TermKeySym sym);
-char       *termkey_lookup_keyname(TermKey *tk, const char *str, TermKeySym *sym);
+const char *termkey_lookup_keyname(TermKey *tk, const char *str, TermKeySym *sym);
 
-TermKeySym termkey_keyname2sym(TermKey *tk, const char *keyname); 
+TermKeySym termkey_keyname2sym(TermKey *tk, const char *keyname);
 
 TermKeyResult termkey_interpret_mouse(TermKey *tk, const TermKeyKey *key, TermKeyMouseEvent *event, int *button, int *line, int *col);
 
@@ -215,6 +215,9 @@ typedef enum {
   TERMKEY_FORMAT_CARETCTRL   = 1 << 1, /* ^X instead of C-X */
   TERMKEY_FORMAT_ALTISMETA   = 1 << 2, /* Meta- or M- instead of Alt- or A- */
   TERMKEY_FORMAT_WRAPBRACKET = 1 << 3, /* Wrap special keys in brackets like <Escape> */
+  TERMKEY_FORMAT_SPACEMOD    = 1 << 4, /* M Foo instead of M-Foo */
+  TERMKEY_FORMAT_LOWERMOD    = 1 << 5, /* meta or m instead of Meta or M */
+  TERMKEY_FORMAT_LOWERSPACE  = 1 << 6, /* page down instead of PageDown */
 
   TERMKEY_FORMAT_MOUSE_POS   = 1 << 8  /* Include mouse position if relevant; @ col,line */
 } TermKeyFormat;
@@ -222,9 +225,11 @@ typedef enum {
 /* Some useful combinations */
 
 #define TERMKEY_FORMAT_VIM (TERMKEY_FORMAT_ALTISMETA|TERMKEY_FORMAT_WRAPBRACKET)
+#define TERMKEY_FORMAT_URWID (TERMKEY_FORMAT_LONGMOD|TERMKEY_FORMAT_ALTISMETA| \
+          TERMKEY_FORMAT_LOWERMOD|TERMKEY_FORMAT_SPACEMOD|TERMKEY_FORMAT_LOWERSPACE)
 
-size_t  termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, TermKeyFormat format);
-char   *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyFormat format);
+size_t      termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, TermKeyFormat format);
+const char *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyFormat format);
 
 int termkey_keycmp(TermKey *tk, const TermKeyKey *key1, const TermKeyKey *key2);
 

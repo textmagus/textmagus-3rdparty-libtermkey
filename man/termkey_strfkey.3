@@ -27,6 +27,15 @@ Use the name "\f(CWMeta\fP" or the letter "\f(CWM\fP" instead of "\f(CWAlt\fP" o
 .B TERMKEY_FORMAT_WRAPBRACKET
 If the key event is a special key instead of unmodified Unicode, wrap it in "\f(CW<brackets>\fP".
 .TP
+.B TERMKEY_FORMAT_SPACEMOD
+Use spaces instead of hyphens to separate the modifier name(s) from the base key name.
+.TP
+.B TERMKEY_FORMAT_LOWERMOD
+Use lowercase for the modifier name.
+.TP
+.B TERMKEY_FORMAT_LOWERSPACE
+Use lowercase with spaces in for the key name instead of camelCase (for example "\f(CWpage down\fP" instead of "\f(CWPageDown\fP").
+.TP
 .B TERMKEY_FORMAT_MOUSE_POS
 If the event is a mouse event, include the position rendered as "\f(CW@ (col,line)\fP".
 .PP
@@ -34,6 +43,9 @@ The following shortcuts are provided for common combinations of format bits:
 .TP
 .B TERMKEY_FORMAT_VIM
 Shortcut to set \fBALTISMETA\fP and \fBWRAPBRACKET\fP, to give an output close to the format the \fIvim\fP editor uses.
+.TP
+.B TERMKEY_FORMAT_URWID
+Shortcut to set \fBALTISMETA\fP, \fBLONGMOD\fP, \fBLOWERMOD\fP, \fBSPACEMOD\fP and \fBLOWERSPACE\fP, to give an output close to the format the \fIurwid\fP python library uses.
 .PP
 When formatting a \fBTERMKEY_TYPE_UNICODE\fP key structure, this function uses the \fIutf8\fP member. If this member contains an empty string (i.e. its first character is 0) then this member will be prefilled by the function from the \fIcode.number\fP member. This can be convenient when the key structure is being constructed programatically by user code.
 .SH "RETURN VALUE"

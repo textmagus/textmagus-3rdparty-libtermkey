@@ -1,6 +1,7 @@
 #include "termkey.h"
 #include "termkey-internal.h"
 
+#include <ctype.h>
 #include <errno.h>
 #include <poll.h>
 #include <unistd.h>
@@ -141,6 +142,23 @@ static void print_key(TermKey *tk, TermKeyKey *key)
       fprintf(stderr, "Mouse ev=%d button=%d pos=(%d,%d)\n", ev, button, line, col);
     }
     break;
+  case TERMKEY_TYPE_POSITION:
+    {
+      int line, col;
+      termkey_interpret_position(tk, key, &line, &col);
+      fprintf(stderr, "Position report pos=(%d,%d)\n", line, col);
+    }
+    break;
+  case TERMKEY_TYPE_MODEREPORT:
+    {
+      int initial, mode, value;
+      termkey_interpret_modereport(tk, key, &initial, &mode, &value);
+      fprintf(stderr, "Mode report mode=%s %d val=%d\n", initial == '?' ? "DEC" : "ANSI", mode, value);
+    }
+    break;
+  case TERMKEY_TYPE_UNKNOWN_CSI:
+    fprintf(stderr, "unknown CSI\n");
+    break;
   }
 
   int m = key->modifiers;
@@ -172,6 +190,70 @@ static const char *res2str(TermKeyResult res)
   return "unknown";
 }
 #endif
+
+/* Similar to snprintf(str, size, "%s", src) except it turns CamelCase into
+ * space separated values
+ */
+static int snprint_cameltospaces(char *str, size_t size, const char *src)
+{
+  int prev_lower = 0;
+  size_t l = 0;
+  while(*src && l < size - 1) {
+    if(isupper(*src) && prev_lower) {
+      if(str)
+        str[l++] = ' ';
+      if(l >= size - 1)
+        break;
+    }
+    prev_lower = islower(*src);
+    str[l++] = tolower(*src++);
+  }
+  str[l] = 0;
+  /* For consistency with snprintf, return the number of bytes that would have
+   * been written, excluding '\0' */
+  while(*src) {
+    if(isupper(*src) && prev_lower) {
+      l++;
+    }
+    prev_lower = islower(*src);
+    src++; l++;
+  }
+  return l;
+}
+
+/* Similar to strcmp(str, strcamel, n) except that:
+ *    it compares CamelCase in strcamel with space separated values in str;
+ *    it takes char**s and updates them
+ * n counts bytes of strcamel, not str
+ */
+static int strpncmp_camel(const char **strp, const char **strcamelp, size_t n)
+{
+  const char *str = *strp, *strcamel = *strcamelp;
+  int prev_lower = 0;
+
+  for( ; (*str || *strcamel) && n; n--) {
+    char b = tolower(*strcamel);
+    if(isupper(*strcamel) && prev_lower) {
+      if(*str != ' ')
+        break;
+      str++;
+      if(*str != b)
+        break;
+    }
+    else
+      if(*str != b)
+        break;
+
+    prev_lower = islower(*strcamel);
+
+    str++;
+    strcamel++;
+  }
+
+  *strp = str;
+  *strcamelp = strcamel;
+  return *str - *strcamel;
+}
 
 static TermKey *termkey_alloc(void)
 {
@@ -300,19 +382,10 @@ TermKey *termkey_new(int fd, int flags)
   tk->fd = fd;
 
   if(!(flags & (TERMKEY_FLAG_RAW|TERMKEY_FLAG_UTF8))) {
-    int locale_is_utf8 = 0;
     char *e;
 
-    if((e = getenv("LANG")) && strstr(e, "UTF-8"))
-      locale_is_utf8 = 1;
-
-    if(!locale_is_utf8 && (e = getenv("LC_MESSAGES")) && strstr(e, "UTF-8"))
-      locale_is_utf8 = 1;
-
-    if(!locale_is_utf8 && (e = getenv("LC_ALL")) && strstr(e, "UTF-8"))
-      locale_is_utf8 = 1;
-
-    if(locale_is_utf8)
+    if(((e = getenv("LANG")) || (e = getenv("LC_MESSAGES")) || (e = getenv("LC_ALL"))) &&
+       strstr(e, "UTF-8"))
       flags |= TERMKEY_FLAG_UTF8;
     else
       flags |= TERMKEY_FLAG_RAW;
@@ -660,7 +733,7 @@ static void emit_codepoint(TermKey *tk, long codepoint, TermKeyKey *key)
       key->type = TERMKEY_TYPE_UNICODE;
       /* Generically modified Unicode ought not report the SHIFT state, or else
        * we get into complicationg trying to report Shift-; vs : and so on...
-       * In order to be able to represent Ctrl-Shift-A as CTRL modified 
+       * In order to be able to represent Ctrl-Shift-A as CTRL modified
        * unicode A, we need to call Ctrl-A simply 'a', lowercase
        */
       if(codepoint+0x40 >= 'A' && codepoint+0x40 <= 'Z')
@@ -1096,7 +1169,7 @@ const char *termkey_get_keyname(TermKey *tk, TermKeySym sym)
   return "UNKNOWN";
 }
 
-char *termkey_lookup_keyname(TermKey *tk, const char *str, TermKeySym *sym)
+static const char *termkey_lookup_keyname_format(TermKey *tk, const char *str, TermKeySym *sym, TermKeyFormat format)
 {
   /* We store an array, so we can't do better than a linear search. Doesn't
    * matter because user won't be calling this too often */
@@ -1106,17 +1179,29 @@ char *termkey_lookup_keyname(TermKey *tk, const char *str, TermKeySym *sym)
     if(!thiskey)
       continue;
     size_t len = strlen(thiskey);
-    if(strncmp(str, thiskey, len) == 0)
-      return (char *)str + len;
+    if(format & TERMKEY_FORMAT_LOWERSPACE) {
+      const char *thisstr = str;
+      if(strpncmp_camel(&thisstr, &thiskey, len) == 0)
+          return thisstr;
+    }
+    else {
+      if(strncmp(str, thiskey, len) == 0)
+        return (char *)str + len;
+    }
   }
 
   return NULL;
 }
 
+const char *termkey_lookup_keyname(TermKey *tk, const char *str, TermKeySym *sym)
+{
+  return termkey_lookup_keyname_format(tk, str, sym, 0);
+}
+
 TermKeySym termkey_keyname2sym(TermKey *tk, const char *keyname)
 {
   TermKeySym sym;
-  char *endp = termkey_lookup_keyname(tk, keyname, &sym);
+  const char *endp = termkey_lookup_keyname(tk, keyname, &sym);
   if(!endp || endp[0])
     return TERMKEY_SYM_UNKNOWN;
   return sym;
@@ -1161,6 +1246,10 @@ modnames[] = {
   { "Shift", "Alt",  "Ctrl" }, // LONGMOD
   { "S",     "M",    "C" },    // ALTISMETA
   { "Shift", "Meta", "Ctrl" }, // ALTISMETA+LONGMOD
+  { "s",     "a",    "c" },    // LOWERMOD
+  { "shift", "alt",  "ctrl" }, // LOWERMOD+LONGMOD
+  { "s",     "m",    "c" },    // LOWERMOD+ALTISMETA
+  { "shift", "meta", "ctrl" }, // LOWERMOD+ALTISMETA+LONGMOD
 };
 
 size_t termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, TermKeyFormat format)
@@ -1169,12 +1258,15 @@ size_t termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, T
   size_t l = 0;
 
   struct modnames *mods = &modnames[!!(format & TERMKEY_FORMAT_LONGMOD) +
-                                    !!(format & TERMKEY_FORMAT_ALTISMETA) * 2];
+                                    !!(format & TERMKEY_FORMAT_ALTISMETA) * 2 +
+                                    !!(format & TERMKEY_FORMAT_LOWERMOD) * 4];
 
   int wrapbracket = (format & TERMKEY_FORMAT_WRAPBRACKET) &&
                     (key->type != TERMKEY_TYPE_UNICODE || key->modifiers != 0);
 
-  if(format & TERMKEY_FORMAT_CARETCTRL && 
+  char sep = (format & TERMKEY_FORMAT_SPACEMOD) ? ' ' : '-';
+
+  if(format & TERMKEY_FORMAT_CARETCTRL &&
      key->type == TERMKEY_TYPE_UNICODE &&
      key->modifiers == TERMKEY_KEYMOD_CTRL) {
     long codepoint = key->code.codepoint;
@@ -1202,19 +1294,19 @@ size_t termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, T
   }
 
   if(key->modifiers & TERMKEY_KEYMOD_ALT) {
-    l = snprintf(buffer + pos, len - pos, "%s-", mods->alt);
+    l = snprintf(buffer + pos, len - pos, "%s%c", mods->alt, sep);
     if(l <= 0) return pos;
     pos += l;
   }
 
   if(key->modifiers & TERMKEY_KEYMOD_CTRL) {
-    l = snprintf(buffer + pos, len - pos, "%s-", mods->ctrl);
+    l = snprintf(buffer + pos, len - pos, "%s%c", mods->ctrl, sep);
     if(l <= 0) return pos;
     pos += l;
   }
 
   if(key->modifiers & TERMKEY_KEYMOD_SHIFT) {
-    l = snprintf(buffer + pos, len - pos, "%s-", mods->shift);
+    l = snprintf(buffer + pos, len - pos, "%s%c", mods->shift, sep);
     if(l <= 0) return pos;
     pos += l;
   }
@@ -1226,10 +1318,17 @@ size_t termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, T
     l = snprintf(buffer + pos, len - pos, "%s", key->utf8);
     break;
   case TERMKEY_TYPE_KEYSYM:
-    l = snprintf(buffer + pos, len - pos, "%s", termkey_get_keyname(tk, key->code.sym));
+    {
+      const char *name = termkey_get_keyname(tk, key->code.sym);
+      if(format & TERMKEY_FORMAT_LOWERSPACE)
+        l = snprint_cameltospaces(buffer + pos, len - pos, name);
+      else
+        l = snprintf(buffer + pos, len - pos, "%s", name);
+    }
     break;
   case TERMKEY_TYPE_FUNCTION:
-    l = snprintf(buffer + pos, len - pos, "F%d", key->code.number);
+    l = snprintf(buffer + pos, len - pos, "%c%d",
+        (format & TERMKEY_FORMAT_LOWERSPACE ? 'f' : 'F'), key->code.number);
     break;
   case TERMKEY_TYPE_MOUSE:
     {
@@ -1238,7 +1337,7 @@ size_t termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, T
       int line, col;
       termkey_interpret_mouse(tk, key, &ev, &button, &line, &col);
 
-      static char *evnames[] = { "Unknown", "Press", "Drag", "Release" };
+      static const char *evnames[] = { "Unknown", "Press", "Drag", "Release" };
 
       l = snprintf(buffer + pos, len - pos, "Mouse%s(%d)",
           evnames[ev], button);
@@ -1280,10 +1379,11 @@ size_t termkey_strfkey(TermKey *tk, char *buffer, size_t len, TermKeyKey *key, T
   return pos;
 }
 
-char *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyFormat format)
+const char *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyFormat format)
 {
   struct modnames *mods = &modnames[!!(format & TERMKEY_FORMAT_LONGMOD) +
-                                    !!(format & TERMKEY_FORMAT_ALTISMETA) * 2];
+                                    !!(format & TERMKEY_FORMAT_ALTISMETA) * 2 +
+                                    !!(format & TERMKEY_FORMAT_LOWERMOD) * 4];
 
   key->modifiers = 0;
 
@@ -1303,10 +1403,10 @@ char *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyForm
     return (char *)str;
   }
 
-  const char *hyphen;
+  const char *sep_at;
 
-  while((hyphen = strchr(str, '-'))) {
-    size_t n = hyphen - str;
+  while((sep_at = strchr(str, (format & TERMKEY_FORMAT_SPACEMOD) ? ' ' : '-'))) {
+    size_t n = sep_at - str;
 
     if(n == strlen(mods->alt) && strncmp(mods->alt, str, n) == 0)
       key->modifiers |= TERMKEY_KEYMOD_ALT;
@@ -1318,14 +1418,14 @@ char *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyForm
     else
       break;
 
-    str = hyphen + 1;
+    str = sep_at + 1;
   }
 
   size_t nbytes;
   ssize_t snbytes;
-  char *endstr;
+  const char *endstr;
 
-  if((endstr = termkey_lookup_keyname(tk, str, &key->code.sym))) {
+  if((endstr = termkey_lookup_keyname_format(tk, str, &key->code.sym, format))) {
     key->type = TERMKEY_TYPE_KEYSYM;
     str = endstr;
   }
@@ -1334,7 +1434,7 @@ char *termkey_strpkey(TermKey *tk, const char *str, TermKeyKey *key, TermKeyForm
     str += snbytes;
   }
   // Unicode must be last
-  else if(parse_utf8((unsigned char *)str, strlen(str), &key->code.codepoint, &nbytes) == TERMKEY_RES_KEY) {
+  else if(parse_utf8((unsigned const char *)str, strlen(str), &key->code.codepoint, &nbytes) == TERMKEY_RES_KEY) {
     key->type = TERMKEY_TYPE_UNICODE;
     fill_utf8(key);
     str += nbytes;

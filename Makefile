@@ -44,11 +44,11 @@ TESTSOURCES=$(wildcard t/[0-9]*.c)
 TESTFILES=$(TESTSOURCES:.c=.t)
 
 VERSION_MAJOR=0
-VERSION_MINOR=16
+VERSION_MINOR=17
 
-VERSION_CURRENT=11
+VERSION_CURRENT=12
 VERSION_REVISION=0
-VERSION_AGE=10
+VERSION_AGE=11
 
 PREFIX=/usr/local
 LIBDIR=$(PREFIX)/lib
@@ -60,28 +60,28 @@ MAN7DIR=$(MANDIR)/man7
 all: $(LIBRARY) $(DEMOS)
 
 %.lo: %.c termkey.h termkey-internal.h
-	$(LIBTOOL) --mode=compile --tag=CC gcc $(CFLAGS) -o $@ -c $<
+	$(LIBTOOL) --mode=compile --tag=CC $(CC) $(CFLAGS) -o $@ -c $<
 
 $(LIBRARY): $(OBJECTS)
-	$(LIBTOOL) --mode=link --tag=CC gcc -rpath $(LIBDIR) -version-info $(VERSION_CURRENT):$(VERSION_REVISION):$(VERSION_AGE) $(LDFLAGS) -o $@ $^
+	$(LIBTOOL) --mode=link --tag=CC $(CC) -rpath $(LIBDIR) -version-info $(VERSION_CURRENT):$(VERSION_REVISION):$(VERSION_AGE) $(LDFLAGS) -o $@ $^
 
 demo: $(LIBRARY) demo.lo
-	$(LIBTOOL) --mode=link --tag=CC gcc -o $@ $^
+	$(LIBTOOL) --mode=link --tag=CC $(CC) -o $@ $^
 
 demo-async: $(LIBRARY) demo-async.lo
-	$(LIBTOOL) --mode=link --tag=CC gcc -o $@ $^
+	$(LIBTOOL) --mode=link --tag=CC $(CC) -o $@ $^
 
 demo-glib.lo: demo-glib.c termkey.h
-	$(LIBTOOL) --mode=compile --tag=CC gcc -o $@ -c $< $(shell pkg-config glib-2.0 --cflags)
+	$(LIBTOOL) --mode=compile --tag=CC $(CC) -o $@ -c $< $(shell pkg-config glib-2.0 --cflags)
 
 demo-glib: $(LIBRARY) demo-glib.lo
-	$(LIBTOOL) --mode=link --tag=CC gcc -o $@ $^ $(shell pkg-config glib-2.0 --libs)
+	$(LIBTOOL) --mode=link --tag=CC $(CC) -o $@ $^ $(shell pkg-config glib-2.0 --libs)
 
 t/%.t: t/%.c $(LIBRARY) t/taplib.lo
-	$(LIBTOOL) --mode=link --tag=CC gcc -o $@ $^
+	$(LIBTOOL) --mode=link --tag=CC $(CC) -o $@ $^
 
 t/taplib.lo: t/taplib.c
-	$(LIBTOOL) --mode=compile --tag=CC gcc $(CFLAGS) -o $@ -c $^
+	$(LIBTOOL) --mode=compile --tag=CC $(CC) $(CFLAGS) -o $@ -c $^
 
 .PHONY: test
 test: $(TESTFILES)
