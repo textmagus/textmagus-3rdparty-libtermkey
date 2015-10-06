@@ -6,8 +6,11 @@
 #include <poll.h>
 #include <unistd.h>
 #include <string.h>
+#include <strings.h>
 
 #include <stdio.h>
+
+#define strcaseeq(a,b) (strcasecmp(a,b) == 0)
 
 void termkey_check_version(int major, int minor)
 {
@@ -313,10 +316,9 @@ static int termkey_init(TermKey *tk, const char *term)
     if(termkey_register_keyname(tk, keynames[i].sym, keynames[i].name) == -1)
       goto abort_free_keynames;
 
-  register_c0(tk, TERMKEY_SYM_BACKSPACE, 0x08, NULL);
-  register_c0(tk, TERMKEY_SYM_TAB,       0x09, NULL);
-  register_c0(tk, TERMKEY_SYM_ENTER,     0x0d, NULL);
-  register_c0(tk, TERMKEY_SYM_ESCAPE,    0x1b, NULL);
+  register_c0(tk, TERMKEY_SYM_TAB,    0x09, NULL);
+  register_c0(tk, TERMKEY_SYM_ENTER,  0x0d, NULL);
+  register_c0(tk, TERMKEY_SYM_ESCAPE, 0x1b, NULL);
 
   struct TermKeyDriverNode *tail = NULL;
 
@@ -384,8 +386,12 @@ TermKey *termkey_new(int fd, int flags)
   if(!(flags & (TERMKEY_FLAG_RAW|TERMKEY_FLAG_UTF8))) {
     char *e;
 
+    /* Most OSes will set .UTF-8. Some will set .utf8. Try to be fairly
+     * generous in parsing these
+     */
     if(((e = getenv("LANG")) || (e = getenv("LC_MESSAGES")) || (e = getenv("LC_ALL"))) &&
-       strstr(e, "UTF-8"))
+       (e = strchr(e, '.')) && e++ &&
+       (strcaseeq(e, "UTF-8") || strcaseeq(e, "UTF8")))
       flags |= TERMKEY_FLAG_UTF8;
     else
       flags |= TERMKEY_FLAG_RAW;
@@ -464,7 +470,11 @@ int termkey_start(TermKey *tk)
       tk->restore_termios_valid = 1;
 
       termios.c_iflag &= ~(IXON|INLCR|ICRNL);
-      termios.c_lflag &= ~(ICANON|ECHO);
+      termios.c_lflag &= ~(ICANON|ECHO
+#ifdef IEXTEN
+          | IEXTEN
+#endif
+      );
       termios.c_cc[VMIN] = 1;
       termios.c_cc[VTIME] = 0;
 
