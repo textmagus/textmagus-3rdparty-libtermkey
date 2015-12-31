@@ -4,7 +4,9 @@
 #include "termkey.h"
 
 #include <stdint.h>
+#if !_WIN32
 #include <termios.h>
+#endif
 
 struct TermKeyDriver
 {
@@ -31,7 +33,7 @@ struct TermKeyDriverNode {
 };
 
 struct TermKey {
-  int    fd;
+  termkey_fd_t fd;
   int    flags;
   int    canonflags;
   unsigned char *buffer;
@@ -41,7 +43,9 @@ struct TermKey {
   size_t hightide; /* Position beyond buffstart at which peekkey() should next start
                     * normally 0, but see also termkey_interpret_csi */
 
+#if !_WIN32
   struct termios restore_termios;
+#endif
   char restore_termios_valid;
 
   int waittime; // msec
@@ -88,7 +92,11 @@ static inline void termkey_key_set_linecol(TermKeyKey *key, int line, int col)
   key->code.mouse[3] = (line & 0xf00) >> 8 | (col & 0x300) >> 4;
 }
 
+#if !_WIN32
 extern struct TermKeyDriver termkey_driver_csi;
 extern struct TermKeyDriver termkey_driver_ti;
+#else
+extern struct TermKeyDriver termkey_driver_win32_pdcurses;
+#endif
 
 #endif

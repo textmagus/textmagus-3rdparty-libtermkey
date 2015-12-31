@@ -3,8 +3,12 @@
 
 #include <ctype.h>
 #include <errno.h>
+#if !_WIN32
 #include <poll.h>
 #include <unistd.h>
+#else
+#define ssize_t int
+#endif
 #include <string.h>
 
 #include <stdio.h>
@@ -27,8 +31,12 @@ void termkey_check_version(int major, int minor)
 }
 
 static struct TermKeyDriver *drivers[] = {
+#if !_WIN32
   &termkey_driver_ti,
   &termkey_driver_csi,
+#else
+  &termkey_driver_win32_pdcurses,
+#endif
   NULL,
 };
 
@@ -263,7 +271,7 @@ static TermKey *termkey_alloc(void)
 
   /* Default all the object fields but don't allocate anything */
 
-  tk->fd         = -1;
+  tk->fd         = FD_NONE;
   tk->flags      = 0;
   tk->canonflags = 0;
 
@@ -373,7 +381,7 @@ abort_free_buffer:
   return 0;
 }
 
-TermKey *termkey_new(int fd, int flags)
+TermKey *termkey_new(termkey_fd_t fd, int flags)
 {
   TermKey *tk = termkey_alloc();
   if(!tk)
@@ -414,7 +422,7 @@ TermKey *termkey_new_abstract(const char *term, int flags)
   if(!tk)
     return NULL;
 
-  tk->fd = -1;
+  tk->fd = FD_NONE;
 
   termkey_set_flags(tk, flags);
 
@@ -457,6 +465,7 @@ int termkey_start(TermKey *tk)
   if(tk->is_started)
     return 1;
 
+#if !_WIN32
   if(tk->fd != -1 && !(tk->flags & TERMKEY_FLAG_NOTERMIOS)) {
     struct termios termios;
     if(tcgetattr(tk->fd, &termios) == 0) {
@@ -472,9 +481,9 @@ int termkey_start(TermKey *tk)
         /* want no signal keys at all, so just disable ISIG */
         termios.c_lflag &= ~ISIG;
       else {
-        /* Disable Ctrl-\==VQUIT and Ctrl-D==VSUSP but leave Ctrl-C as SIGINT */
+        /* Disable Ctrl-\==VQUIT and Ctrl-C==VINTR but leave Ctrl-Z as SIGTSTP */
         termios.c_cc[VQUIT] = _POSIX_VDISABLE;
-        termios.c_cc[VSUSP] = _POSIX_VDISABLE;
+        termios.c_cc[VINTR] = _POSIX_VDISABLE;
         /* Some OSes have Ctrl-Y==VDSUSP */
 #ifdef VDSUSP
         termios.c_cc[VDSUSP] = _POSIX_VDISABLE;
@@ -487,6 +496,7 @@ int termkey_start(TermKey *tk)
       tcsetattr(tk->fd, TCSANOW, &termios);
     }
   }
+#endif
 
   struct TermKeyDriverNode *p;
   for(p = tk->drivers; p; p = p->next)
@@ -512,8 +522,10 @@ int termkey_stop(TermKey *tk)
     if(p->driver->stop_driver)
       (*p->driver->stop_driver)(tk, p->info);
 
+#if !_WIN32
   if(tk->restore_termios_valid)
     tcsetattr(tk->fd, TCSANOW, &tk->restore_termios);
+#endif
 
   tk->is_started = 0;
 
@@ -525,10 +537,17 @@ int termkey_is_started(TermKey *tk)
   return tk->is_started;
 }
 
-int termkey_get_fd(TermKey *tk)
+termkey_fd_t termkey_get_fd(TermKey *tk)
 {
   return tk->fd;
 }
+
+#if _WIN32
+void termkey_set_fd(TermKey *tk, termkey_fd_t fd)
+{
+  tk->fd = fd;
+}
+#endif
 
 int termkey_get_flags(TermKey *tk)
 {
@@ -1012,7 +1031,7 @@ TermKeyResult termkey_getkey_force(TermKey *tk, TermKeyKey *key)
 
 TermKeyResult termkey_waitkey(TermKey *tk, TermKeyKey *key)
 {
-  if(tk->fd == -1) {
+  if(tk->fd == FD_NONE) {
     errno = EBADF;
     return TERMKEY_RES_ERROR;
   }
@@ -1026,6 +1045,7 @@ TermKeyResult termkey_waitkey(TermKey *tk, TermKeyKey *key)
       case TERMKEY_RES_ERROR:
         return ret;
 
+#if !_WIN32
       case TERMKEY_RES_NONE:
         ret = termkey_advisereadable(tk);
         if(ret == TERMKEY_RES_ERROR)
@@ -1064,6 +1084,7 @@ retry:
             return termkey_getkey_force(tk, key);
         }
         break;
+#endif
     }
   }
 
@@ -1072,6 +1093,7 @@ retry:
 
 TermKeyResult termkey_advisereadable(TermKey *tk)
 {
+#if !_WIN32
   ssize_t len;
 
   if(tk->fd == -1) {
@@ -1109,6 +1131,9 @@ retry:
     tk->buffcount += len;
     return TERMKEY_RES_AGAIN;
   }
+#else
+  return TERMKEY_RES_NONE;
+#endif
 }
 
 size_t termkey_push_bytes(TermKey *tk, const char *bytes, size_t len)

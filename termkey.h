@@ -14,6 +14,14 @@ extern "C" {
 #define TERMKEY_CHECK_VERSION \
         termkey_check_version(TERMKEY_VERSION_MAJOR, TERMKEY_VERSION_MINOR)
 
+#if !_WIN32
+#define termkey_fd_t int
+#define FD_NONE -1
+#else
+#define termkey_fd_t void*
+#define FD_NONE NULL
+#endif
+
 typedef enum {
   TERMKEY_SYM_UNKNOWN = -1,
   TERMKEY_SYM_NONE = 0,
@@ -161,7 +169,7 @@ enum {
 
 void termkey_check_version(int major, int minor);
 
-TermKey *termkey_new(int fd, int flags);
+TermKey *termkey_new(termkey_fd_t fd, int flags);
 TermKey *termkey_new_abstract(const char *term, int flags);
 void     termkey_free(TermKey *tk);
 void     termkey_destroy(TermKey *tk);
@@ -170,7 +178,10 @@ int termkey_start(TermKey *tk);
 int termkey_stop(TermKey *tk);
 int termkey_is_started(TermKey *tk);
 
-int termkey_get_fd(TermKey *tk);
+termkey_fd_t termkey_get_fd(TermKey *tk);
+#if _WIN32
+void termkey_set_fd(TermKey *tk, termkey_fd_t fd);
+#endif
 
 int  termkey_get_flags(TermKey *tk);
 void termkey_set_flags(TermKey *tk, int newflags);
