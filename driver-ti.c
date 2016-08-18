@@ -315,7 +315,7 @@ static int start_driver(TermKey *tk, void *info)
   // Can't call putp or tputs because they suck and don't give us fd control
   len = strlen(start_string);
   while(len) {
-    size_t written = write(tk->fd, start_string, len);
+    ssize_t written = write(tk->fd, start_string, len);
     if(written == -1)
       return 0;
     start_string += written;
@@ -348,7 +348,7 @@ static int stop_driver(TermKey *tk, void *info)
   // Can't call putp or tputs because they suck and don't give us fd control
   len = strlen(stop_string);
   while(len) {
-    size_t written = write(tk->fd, stop_string, len);
+    ssize_t written = write(tk->fd, stop_string, len);
     if(written == -1)
       return 0;
     stop_string += written;
@@ -473,7 +473,7 @@ static struct {
   { "suspend",   TERMKEY_TYPE_KEYSYM, TERMKEY_SYM_SUSPEND,   0 },
   { "undo",      TERMKEY_TYPE_KEYSYM, TERMKEY_SYM_UNDO,      0 },
   { "up",        TERMKEY_TYPE_KEYSYM, TERMKEY_SYM_UP,        0 },
-  { NULL },
+  { NULL, 0, 0, 0 },
 };
 
 static int funcname2keysym(const char *funcname, TermKeyType *typep, TermKeySym *symp, int *modmaskp, int *modsetp)
